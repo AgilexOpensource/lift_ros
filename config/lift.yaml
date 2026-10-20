@@ -1,0 +1,40 @@
+# Lift module (YAML key must match module_key: torso).
+#
+# Protocol notes (same frame format as agx_motor_sdk arm protocol; upper-layer semantics remapped):
+#   Lift column command/feedback:
+#     - SDK "position_rad" -> firmware position [mm]; ROS/URDF joint space uses [m]
+#       Use polarity=0.001: motor_mm = joint_m / 0.001
+#     - SDK "velocity_rad_s" -> firmware velocity [mm/s]
+#       (protocol lib converts raw 0.001 mm/s integers from high-speed feedback)
+#     - SDK "current / effort" -> firmware PWM (+/-450); status only, not real current/torque
+#     - profile_vel / profile_accel / profile_decel go to motor space via configure()
+#       Units: [mm/s], [mm/s^2]
+#   Waist pitch:
+#     - rad / rad/s / N*m; torque_b=50 is an 50 N*m rated-torque placeholder
+
+torso:
+  can_channel: can0
+  profile_vel: 3.0
+  profile_accel: 5.0
+  profile_decel: 5.0
+  joints:
+    # --- Lift column ---
+    - joint_name: torso_joint1
+      node_id: 1
+      # m <-> mm
+      polarity: 0.001
+      # Profile speed/accel/decel in motor space [mm/s], [mm/s^2]
+      profile_vel: 15.0
+      profile_accel: 30.0
+      profile_decel: 30.0
+      # Joint-space soft limits [m] (max stroke 400 mm)
+      lower_limit: 0.0
+      upper_limit: 0.4
+
+    # --- Waist pitch ---
+    - joint_name: torso_joint2
+      node_id: 2
+      polarity: 1.0
+      lower_limit: -1.55225
+      upper_limit: 1.55225
+      torque_b: 50.0
