@@ -12,10 +12,7 @@ def _launch_setup(context, *args, **kwargs):
     overrides = {}
 
     yaml_path = LaunchConfiguration("yaml_path").perform(context).strip()
-    if not yaml_path:
-        share = get_package_share_directory("lift_ros")
-        overrides["yaml_path"] = os.path.join(share, "config", "lift.yaml")
-    else:
+    if yaml_path:
         overrides["yaml_path"] = yaml_path
 
     module_key = LaunchConfiguration("module_key").perform(context).strip()
@@ -25,10 +22,6 @@ def _launch_setup(context, *args, **kwargs):
     can_channel = LaunchConfiguration("can_channel").perform(context).strip()
     if can_channel:
         overrides["can_channel"] = can_channel
-
-    control_mode = LaunchConfiguration("control_mode").perform(context).strip()
-    if control_mode:
-        overrides["control_mode"] = control_mode
 
     for name in ("control_enabled", "auto_configure", "auto_enable"):
         value = LaunchConfiguration(name).perform(context).strip()
@@ -45,9 +38,9 @@ def _launch_setup(context, *args, **kwargs):
 
     return [
         Node(
-            package="motor_ros",
-            executable="motor_node",
-            name="motor_node",
+            package="lift_ros",
+            executable="lift_node",
+            name="lift_node",
             namespace=LaunchConfiguration("namespace"),
             output="screen",
             parameters=parameters,
@@ -69,12 +62,12 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "yaml_path",
                 default_value="",
-                description="Lift motor YAML (empty = lift_ros/config/lift.yaml).",
+                description="Lift YAML path (empty = use params_file).",
             ),
             DeclareLaunchArgument(
                 "can_channel",
                 default_value="",
-                description="Override module default CAN channel (empty = use lift YAML).",
+                description="Override CAN channel (empty = use params_file / lift YAML).",
             ),
             DeclareLaunchArgument(
                 "module_key",
@@ -85,12 +78,6 @@ def generate_launch_description() -> LaunchDescription:
                 "params_file",
                 default_value=default_params,
                 description="lift_ros parameter file",
-            ),
-            DeclareLaunchArgument(
-                "control_mode",
-                default_value="",
-                choices=["", "pos", "mit"],
-                description="Control mode (empty = use params_file). Lift column uses pos.",
             ),
             DeclareLaunchArgument(
                 "control_enabled",

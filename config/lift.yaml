@@ -9,7 +9,7 @@
 #     - SDK "current / effort" -> firmware PWM (+/-450); status only, not real current/torque
 #     - profile_vel / profile_accel / profile_decel go to motor space via configure()
 #       Units: [mm/s], [mm/s^2]
-#   Waist pitch:
+#   Waist pitch (RB200 protocol, shares can0 with the lift column):
 #     - rad / rad/s / N*m; torque_b=50 is an 50 N*m rated-torque placeholder
 
 torso:
@@ -34,6 +34,7 @@ torso:
     # --- Waist pitch ---
     - joint_name: torso_joint2
       node_id: 2
+      protocol: rb200
       polarity: 1.0
       lower_limit: -1.55225
       upper_limit: 1.55225
