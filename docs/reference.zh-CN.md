@@ -15,7 +15,7 @@
 | `auto_enable` | `true` | 启动时使能电机 |
 | `control_enabled` | `true` | 初始指令门控 |
 | `feedback_rate` | `100.0` | 关节反馈频率，Hz |
-| `status_rate` | `2.0` | 诊断频率，Hz |
+| `status_rate` | `30.0` | 诊断发布频率，Hz；不改变硬件反馈频率 |
 | `status_timeout` | `2.0` | 诊断新鲜度上限，s |
 
 - 频率和 `status_timeout` 必须有限且大于 0。

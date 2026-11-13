@@ -15,7 +15,7 @@ Parameters, launch arguments, command rules, hardware YAML, diagnostics, operati
 | `auto_enable` | `true` | Enable the motors at startup |
 | `control_enabled` | `true` | Initial command gate |
 | `feedback_rate` | `100.0` | Joint feedback rate, Hz |
-| `status_rate` | `2.0` | Diagnostics rate, Hz |
+| `status_rate` | `30.0` | Diagnostics publication rate, Hz; does not change hardware feedback frequency |
 | `status_timeout` | `2.0` | Diagnostics freshness bound, s |
 
 - Rates and `status_timeout` must be finite and greater than 0.
