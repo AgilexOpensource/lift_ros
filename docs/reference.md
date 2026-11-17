@@ -17,8 +17,9 @@ Parameters, launch arguments, command rules, hardware YAML, diagnostics, operati
 | `feedback_rate` | `100.0` | Joint feedback rate, Hz |
 | `status_rate` | `30.0` | Diagnostics publication rate, Hz; does not change hardware feedback frequency |
 | `status_timeout` | `2.0` | Diagnostics freshness bound, s |
+| `feedback_timeout` | `0.5` | Joint feedback older than this is not published, s; 0 publishes cached samples forever |
 
-- Rates and `status_timeout` must be finite and greater than 0.
+- Rates and `status_timeout` must be finite and greater than 0; `feedback_timeout` must be finite and at least 0.
 - All parameters are read-only after startup.
 - `control_enabled` keeps its startup value; the `control_enable` service changes the live gate.
 - Per-joint enable and disable frames are sent 0.1 s apart.
@@ -46,7 +47,7 @@ Rules for messages on `control/joint_states`:
 
 Units: the column uses m and m/s in ROS (`0.1` m is 100 mm) and reports PWM (±450) as effort, which is not a measured force. The waist uses rad, rad/s and N·m.
 
-Joints without SDK state are left out of `feedback/joint_states`.
+Joints without SDK state are left out of `feedback/joint_states`. So is a joint whose high-speed feedback is older than `feedback_timeout` (host wall clock): after a power loss the SDK keeps returning its last sample, which would otherwise look live to downstream controllers. Samples without a timestamp cannot be judged and are published.
 
 ## Hardware YAML
 
@@ -92,7 +93,7 @@ For both protocols, missing, nonpositive, future or expired timestamps give `STA
 ## Operating boundaries
 
 - Closing the command gate does not disable the motors or cancel targets already sent.
-- Stale diagnostics do not stop commands or clear cached joint feedback.
+- Stale diagnostics do not stop commands. Joint feedback has its own `feedback_timeout`.
 - Node exit closes the SDK connection without disabling the motors; the column then depends on its mechanical load support.
 - The `enable` service reports the SDK result; read `motor_status` for the hardware state.
 - Watchdogs, trajectory execution and fault recovery belong upstream of this driver.
