@@ -355,9 +355,12 @@ class LiftRosNode(Node):
                 continue
             self._disabled_logged.discard(name)
             position = float(msg.position[idx])
+            # Only RB200 needs 0xFF after the first position-mode frame; arm-protocol motors
+            # get the explicit position mode on every frame.
             mode = (
                 TARGET_MODE_UNCHANGED
-                if self._position_mode_sent.get(name)
+                if getattr(motor, "protocol", "arm") == "rb200"
+                and self._position_mode_sent.get(name)
                 else TARGET_MODE_POSITION
             )
             if not motor.set_target(position, mode):

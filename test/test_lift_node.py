@@ -144,6 +144,21 @@ def test_position_mode_sent_once(lift_node):
     assert calls == [(0, 0.2, 1), (0, 0.3, 0xFF)]
 
 
+def test_arm_protocol_sends_position_mode_every_frame(lift_node):
+    node, calls = make_control_node(lift_node)
+    feedback = SimpleNamespace(status=SimpleNamespace(enabled=True), timestamp_ns=9_000_000_000)
+
+    def motor(index):
+        return SimpleNamespace(
+            set_target=lambda position, mode: calls.append((index, position, mode)) or True,
+            protocol="arm", get_low_speed_feedback=lambda: feedback)
+
+    node._group = SimpleNamespace(motor=motor)
+    for position in (0.2, 0.3):
+        node._on_control(SimpleNamespace(name=["joint1"], position=[position]))
+    assert calls == [(0, 0.2, 1), (0, 0.3, 1)]
+
+
 def test_disabled_motor_command_dropped_until_enabled(lift_node):
     enabled = {0: False, 1: True}
     node, calls = make_control_node(lift_node, enabled)
