@@ -10,3 +10,7 @@
     status_rate: 30.0
     status_timeout: 2.0
     control_enabled: true
+    velocity_joints: [""]
+    velocity_rate: 100.0
+    velocity_gain: 3.0
+    velocity_tolerance: 0.0003

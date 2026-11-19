@@ -105,6 +105,7 @@ def make_control_node(module, enabled=None):
     node._position_mode_sent = {name: False for name in node._joint_names}
     node._disabled_logged = set()
     node._status_timeout = 2.0
+    node._loops = {}
     warnings = []
 
     def motor(index):
@@ -334,7 +335,7 @@ def test_invalid_rates_rejected_before_connect(lift_node, parameter, value):
 def test_startup_parameters_readonly_and_default_rates(lift_node, monkeypatch):
     configure_startup(lift_node, monkeypatch)
     node = lift_node.LiftRosNode()
-    assert len(node.descriptors) == 10
+    assert len(node.descriptors) == 14
     assert all(descriptor.read_only for descriptor in node.descriptors.values())
     assert [period for period, _ in node.timers] == pytest.approx([0.01, 1.0 / 30.0])
 
@@ -583,7 +584,7 @@ def make_restore_node(module, monkeypatch, enabled=False, status_ns=10_100_000_0
     node = module.LiftRosNode.__new__(module.LiftRosNode)
     node._recovered = {0: 10_000_000_000} if recovered else {}
     node._recover_after, node._enable_wanted, node._restoring = 0.0, True, set()
-    node._withheld, node._feedback_timeout = {}, 0.5
+    node._withheld, node._feedback_timeout, node._loops = {}, 0.5, {}
     node._joint_names = ["joint0"]
     node._stale_joints = set()
     node._auto_configure = True
@@ -714,3 +715,88 @@ def test_withheld_joint_drops_targets(lift_node):
     node._on_control(SimpleNamespace(name=["joint1", "joint2"], position=[0.2, 0.3]))
     assert calls == [(1, 0.3, 1)]
     assert node._position_mode_sent["joint1"] is False
+
+
+def make_velocity_node(module, position=0.1, lag=1):
+    """Joint 0 runs a velocity loop; the simulated joint follows commands ``lag`` steps late."""
+    node, _ = make_control_node(module)
+    calls, state = [], {"position": position, "pending": [0.0] * lag}
+    period = 0.01
+
+    def set_target(value, mode, timeout=0.0):
+        calls.append((value, mode, timeout))
+        if mode == module.TARGET_MODE_VELOCITY:
+            state["pending"].append(value)
+            state["position"] += state["pending"].pop(0) * period
+        return True
+
+    feedback = SimpleNamespace(status=SimpleNamespace(enabled=True), timestamp_ns=9_000_000_000)
+    motor = SimpleNamespace(set_target=set_target, protocol="arm", get_low_speed_feedback=lambda: feedback)
+    node._group = SimpleNamespace(
+        motor=lambda index: motor,
+        get_state=lambda index: SimpleNamespace(position_rad=state["position"]),
+    )
+    node._loops = {0: module.VelocityLoop(0.015, 0.08, 0.0, 0.395)}
+    node._velocity_period, node._velocity_gain, node._velocity_tolerance = period, 3.0, 0.0003
+    return node, calls, state
+
+
+def run_velocity(node, steps):
+    for _ in range(steps):
+        node._run_velocity_loops()
+
+
+def test_velocity_joint_tracks_target_in_velocity_mode_only(lift_node):
+    node, calls, state = make_velocity_node(lift_node, lag=30)
+    node._on_control(SimpleNamespace(name=["joint1"], position=[0.15]))
+    run_velocity(node, 800)
+    assert {mode for _, mode, _ in calls} == {lift_node.TARGET_MODE_VELOCITY}
+    assert {timeout for _, _, timeout in calls} == {lift_node.VELOCITY_TIMEOUT_S}
+    assert max(abs(value) for value, _, _ in calls) <= 0.015
+    assert state["position"] == pytest.approx(0.15, abs=0.0003)
+    assert calls[-1][0] == 0.0
+
+
+def test_velocity_target_is_clamped_to_joint_limits(lift_node):
+    node, _, state = make_velocity_node(lift_node, position=0.39)
+    node._on_control(SimpleNamespace(name=["joint1"], position=[0.4]))
+    assert node._loops[0].target == 0.395
+    run_velocity(node, 200)
+    assert state["position"] <= 0.395 + 1e-9
+
+
+def test_velocity_command_stops_at_limit(lift_node):
+    loop = lift_node.VelocityLoop(0.015, 0.08, 0.0, 0.395, target=0.395, reference=0.395, velocity=0.01)
+    assert loop.command(0.395, 3.0, 0.0003, 0.01) == 0.0
+
+
+def test_closing_gate_stops_velocity_joint(lift_node):
+    node, calls, _ = make_velocity_node(lift_node)
+    node._on_control(SimpleNamespace(name=["joint1"], position=[0.2]))
+    run_velocity(node, 50)
+    calls.clear()
+    node._on_control_enable(SimpleNamespace(data=False), SimpleNamespace())
+    assert calls == [(0.0, lift_node.TARGET_MODE_VELOCITY, lift_node.VELOCITY_TIMEOUT_S)]
+    run_velocity(node, 10)
+    assert len(calls) == 1
+
+
+def test_stale_feedback_stops_velocity_joint(lift_node):
+    node, calls, _ = make_velocity_node(lift_node)
+    node._on_control(SimpleNamespace(name=["joint1"], position=[0.2]))
+    run_velocity(node, 5)
+    node._stale_joints.add("joint1")
+    calls.clear()
+    run_velocity(node, 5)
+    assert calls == [(0.0, lift_node.TARGET_MODE_VELOCITY, lift_node.VELOCITY_TIMEOUT_S)]
+    assert node._loops[0].target is None
+
+
+@pytest.mark.parametrize("parameter,value", [
+    ("velocity_rate", 0.0), ("velocity_rate", float("nan")),
+    ("velocity_gain", -1.0), ("velocity_tolerance", float("inf")),
+])
+def test_invalid_velocity_parameters_rejected_before_connect(lift_node, parameter, value):
+    lift_node.LiftRosNode.__bases__[0].parameter_overrides = {parameter: value}
+    with pytest.raises(ValueError, match=parameter):
+        lift_node.LiftRosNode()

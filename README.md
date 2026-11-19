@@ -2,7 +2,7 @@
 
 [中文](README.zh-CN.md)
 
-ROS 2 driver for the lift column (arm protocol) and waist pitch (RB200 protocol) with profile position control, built on [agx_motor_sdk](https://github.com/kehuanjack/agx_motor_sdk).
+ROS 2 driver for the lift column (arm protocol) and waist pitch (RB200 protocol) with profile position control and an optional velocity-mode position loop for the column, built on [agx_motor_sdk](https://github.com/kehuanjack/agx_motor_sdk).
 
 > **Safety:** Default startup configures and enables the motors and accepts commands. Check wiring, node IDs, calibration, limits and mechanical clearance first, and provide an independent emergency stop. Provide mechanical load support for the column.
 

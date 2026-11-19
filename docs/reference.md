@@ -18,8 +18,12 @@ Parameters, launch arguments, command rules, hardware YAML, diagnostics, operati
 | `status_rate` | `30.0` | Diagnostics publication rate, Hz; does not change hardware feedback frequency |
 | `status_timeout` | `2.0` | Diagnostics freshness bound, s |
 | `feedback_timeout` | `0.5` | Joint feedback older than this is not published, s; 0 publishes cached samples forever |
+| `velocity_joints` | `[""]` | Arm-protocol joints driven by the [velocity loop](#velocity-loop) instead of profile position mode; empty entries are ignored |
+| `velocity_rate` | `100.0` | Velocity loop rate, Hz |
+| `velocity_gain` | `3.0` | Velocity loop position gain, 1/s |
+| `velocity_tolerance` | `0.0003` | Velocity loop deadband around the target, joint units |
 
-- Rates and `status_timeout` must be finite and greater than 0; `feedback_timeout` must be finite and at least 0.
+- Rates and `status_timeout` must be finite and greater than 0; `feedback_timeout`, `velocity_gain` and `velocity_tolerance` must be finite and at least 0.
 - All parameters are read-only after startup.
 - `control_enabled` keeps its startup value; the `control_enable` service changes the live gate.
 - Per-joint enable and disable frames are sent 0.1 s apart.
@@ -42,12 +46,23 @@ Rules for messages on `control/joint_states`:
 
 - `name` and `position` must be nonempty, the same length and free of duplicates. Subsets are allowed; unknown joints are skipped.
 - Used values must be finite; an invalid message is rejected as a whole. A failed write is logged and other joints continue.
-- Only `position` is used. The first target for each joint also selects profile position mode; later targets leave the mode unchanged. Disabling through the `enable` service resets this.
+- Only `position` is used. Arm-protocol joints get profile position mode on every frame. For RB200 joints the first target selects profile position mode and later targets leave it unchanged; disabling through the `enable` service resets this. Joints in `velocity_joints` are handled by the [velocity loop](#velocity-loop).
 - Headers are ignored; there is no age check or acknowledgment.
 
 Units: the column uses m and m/s in ROS (`0.1` m is 100 mm) and reports PWM (±450) as effort, which is not a measured force. The waist uses rad, rad/s and N·m.
 
 Joints without SDK state are left out of `feedback/joint_states`. So is a joint whose high-speed feedback is older than `feedback_timeout` (host wall clock): after a power loss the SDK keeps returning its last sample, which would otherwise look live to downstream controllers. Samples without a timestamp cannot be judged and are published.
+
+## Velocity loop
+
+In profile position mode the column firmware plans every new target to a stop, so a stream of slowly moving targets stutters. Joints listed in `velocity_joints` are instead driven in velocity mode by a position loop in the node; topics still carry position targets.
+
+- Each target is clamped to the YAML limits. A reference moves toward it with the joint `profile_vel` and `profile_accel` (`profile_decel` is not used).
+- At `velocity_rate` the node sends the reference velocity plus `velocity_gain` times the error between the reference delayed by 0.3 s (the measured motor lag) and the feedback position. Within `velocity_tolerance` of the target the correction is zero, and the joint holds the target with velocity 0.
+- Commands are clamped to `profile_vel`, and are zeroed when they would push past a limit.
+- Every velocity frame carries a 0.1 s firmware timeout, so the motor stops by itself when the node stops sending.
+- Closing the command gate, a disable through `enable`, stale or withheld feedback, or a motor that is not enabled send velocity 0 and stop the loop. The next target restarts it from the measured position.
+- Only arm-protocol joints are supported. Startup fails for an unknown joint, another protocol, or a missing `profile_vel` or `profile_accel`.
 
 ## Hardware YAML
 
@@ -92,7 +107,7 @@ For both protocols, missing, nonpositive, future or expired timestamps give `STA
 
 ## Operating boundaries
 
-- Closing the command gate does not disable the motors or cancel targets already sent.
+- Closing the command gate does not disable the motors or cancel targets already sent; velocity-loop joints are stopped.
 - Stale diagnostics do not stop commands. Joint feedback has its own `feedback_timeout`.
 - Node exit closes the SDK connection without disabling the motors; the column then depends on its mechanical load support.
 - The `enable` service reports the SDK result; read `motor_status` for the hardware state.

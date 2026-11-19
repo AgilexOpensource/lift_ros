@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""ROS 2 node bridging agx_motor_sdk JointGroup for lift (arm + RB200 protocols, position only)."""
+"""ROS 2 node bridging agx_motor_sdk JointGroup for lift (arm + RB200 protocols, position targets)."""
 
 import math
 import os
 import time
+from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Set
 
@@ -21,10 +23,57 @@ from agx_motor_sdk.mechanism import JointGroup
 PACKAGE_NAME = "lift_ros"
 DEFAULT_LIFT_YAML = "lift.yaml"
 DEFAULT_MODULE_KEY = "torso"
+TARGET_MODE_VELOCITY = 0
 TARGET_MODE_POSITION = 1
 TARGET_MODE_UNCHANGED = 0xFF
 # Delay between per-joint enable/disable frames so boards do not drop back-to-back frames.
 ENABLE_INTERVAL_S = 0.1
+# Firmware command timeout of velocity frames, so a lost node stops the motor.
+VELOCITY_TIMEOUT_S = 0.1
+# Measured delay from a velocity command to the feedback position following it.
+VELOCITY_LAG_S = 0.3
+
+
+@dataclass
+class VelocityLoop:
+    """Position loop of one joint driven in velocity mode only; ``target`` None while idle."""
+
+    max_velocity: float
+    max_acceleration: float
+    lower: float = -math.inf
+    upper: float = math.inf
+    target: Optional[float] = None
+    reference: float = 0.0
+    velocity: float = 0.0
+    history: deque = field(default_factory=deque)
+
+    def clamp(self, position: float) -> float:
+        return min(max(position, self.lower), self.upper)
+
+    def advance(self, dt: float) -> None:
+        """Move the reference toward the target with a velocity and acceleration limit."""
+        distance = self.target - self.reference
+        stop = math.copysign(min(self.max_velocity, math.sqrt(2.0 * self.max_acceleration * abs(distance))),
+                             distance)
+        step = self.max_acceleration * dt
+        self.velocity = min(max(stop, self.velocity - step), self.velocity + step)
+        if abs(distance) <= abs(self.velocity) * dt:
+            self.reference, self.velocity = self.target, 0.0
+        else:
+            self.reference += self.velocity * dt
+
+    def command(self, measured: float, gain: float, tolerance: float, dt: float) -> float:
+        """Feedforward plus P against the reference delayed by the motor lag."""
+        self.history.append(self.reference)
+        while len(self.history) > max(1, round(VELOCITY_LAG_S / dt)):
+            self.history.popleft()
+        error = self.history[0] - measured
+        if self.history[0] == self.target and abs(error) <= tolerance:
+            error = 0.0
+        velocity = min(max(self.velocity + gain * error, -self.max_velocity), self.max_velocity)
+        if (measured >= self.upper and velocity > 0.0) or (measured <= self.lower and velocity < 0.0):
+            velocity = 0.0
+        return velocity
 
 
 MOTOR_FAULT_FIELDS = (
@@ -120,6 +169,10 @@ class LiftRosNode(Node):
             "status_timeout": 2.0,
             "feedback_timeout": 0.5,
             "control_enabled": True,
+            "velocity_joints": [""],
+            "velocity_rate": 100.0,
+            "velocity_gain": 3.0,
+            "velocity_tolerance": 0.0003,
         }
         for name, default in startup_parameters.items():
             self.declare_parameter(name, default, ParameterDescriptor(read_only=True))
@@ -146,6 +199,17 @@ class LiftRosNode(Node):
         self._restoring: Set[int] = set()
         self._withheld: Dict[int, float] = {}
         self._control_enabled = bool(self.get_parameter("control_enabled").value)
+        velocity_joints = [str(name) for name in self.get_parameter("velocity_joints").value if str(name)]
+        velocity_rate = float(self.get_parameter("velocity_rate").value)
+        self._velocity_gain = float(self.get_parameter("velocity_gain").value)
+        self._velocity_tolerance = float(self.get_parameter("velocity_tolerance").value)
+        if not math.isfinite(velocity_rate) or velocity_rate <= 0.0:
+            raise ValueError("velocity_rate must be finite and > 0")
+        if not math.isfinite(self._velocity_gain) or self._velocity_gain < 0.0:
+            raise ValueError("velocity_gain must be finite and >= 0")
+        if not math.isfinite(self._velocity_tolerance) or self._velocity_tolerance < 0.0:
+            raise ValueError("velocity_tolerance must be finite and >= 0")
+        self._velocity_period = 1.0 / velocity_rate
         self._control_gate_block_logged = False
 
         config_path = resolve_yaml_path(yaml_path)
@@ -162,6 +226,9 @@ class LiftRosNode(Node):
             name: False for name in self._joint_names
         }
         self._disabled_logged: Set[str] = set()
+        self._loops: Dict[int, VelocityLoop] = {
+            self._joint_by_name[name]: self._velocity_loop(name) for name in velocity_joints
+        }
 
         try:
             if not self._group.connect():
@@ -190,6 +257,8 @@ class LiftRosNode(Node):
         period = 1.0 / feedback_rate
         self._feedback_timer = self.create_timer(period, self._publish_feedback)
         self._status_timer = self.create_timer(1.0 / status_rate, self._publish_status)
+        if self._loops:
+            self._velocity_timer = self.create_timer(self._velocity_period, self._run_velocity_loops)
 
         self.get_logger().info(
             "lift_ros ready module=%s can=%s joints=[%s] gate=%s"
@@ -200,6 +269,63 @@ class LiftRosNode(Node):
                 self._control_enabled,
             )
         )
+
+    def _velocity_loop(self, name: str) -> VelocityLoop:
+        """Limits of a velocity-mode joint from the hardware YAML, in joint space."""
+        index = self._joint_by_name.get(name)
+        if index is None or index == JointGroup.INVALID_JOINT_INDEX:
+            raise ValueError("velocity_joints: unknown joint %s" % name)
+        config = self._group.joint_config(index)
+        if config.protocol != "arm":
+            raise ValueError("velocity_joints: %s is not an arm-protocol motor" % name)
+        scale = abs(config.polarity) or 1.0
+        loop = VelocityLoop(config.profile_vel_rad_s * scale, config.profile_accel_rad_s2 * scale)
+        if not (math.isfinite(loop.max_velocity) and loop.max_velocity > 0.0
+                and math.isfinite(loop.max_acceleration) and loop.max_acceleration > 0.0):
+            raise ValueError("velocity_joints: %s needs profile_vel and profile_accel > 0" % name)
+        if config.has_lower_limit:
+            loop.lower = config.lower_limit_rad
+        if config.has_upper_limit:
+            loop.upper = config.upper_limit_rad
+        return loop
+
+    def _measured(self, index: int) -> Optional[float]:
+        if self._joint_names[index] in self._stale_joints or index in self._withheld:
+            return None
+        state = self._group.get_state(index)
+        return None if state is None else state.position_rad
+
+    def _set_velocity_target(self, index: int, position: float) -> None:
+        loop = self._loops[index]
+        if loop.target is None:
+            measured = self._measured(index)
+            if measured is None:
+                return
+            loop.reference, loop.velocity = measured, 0.0
+            loop.history.clear()
+        loop.target = loop.clamp(position)
+
+    def _stop_velocity(self, index: int) -> None:
+        loop = self._loops[index]
+        if loop.target is not None:
+            self._group.motor(index).set_target(0.0, TARGET_MODE_VELOCITY, VELOCITY_TIMEOUT_S)
+        loop.target = None
+        loop.velocity = 0.0
+
+    def _run_velocity_loops(self) -> None:
+        """Step every active velocity-mode joint; it keeps holding the target in velocity mode."""
+        for index, loop in self._loops.items():
+            if loop.target is None:
+                continue
+            measured = self._measured(index)
+            motor = self._group.motor(index)
+            if measured is None or not self._control_enabled or not self._motor_enabled(motor):
+                self._stop_velocity(index)
+                continue
+            loop.advance(self._velocity_period)
+            velocity = loop.command(measured, self._velocity_gain, self._velocity_tolerance, self._velocity_period)
+            if not motor.set_target(velocity, TARGET_MODE_VELOCITY, VELOCITY_TIMEOUT_S):
+                self.get_logger().warn("set_target failed for %s" % self._joint_names[index])
 
     def _check_can_control(self) -> bool:
         if not self._control_enabled:
@@ -372,6 +498,9 @@ class LiftRosNode(Node):
             self._disabled_logged.discard(name)
             self._confirm_restored(index)
             position = float(msg.position[idx])
+            if index in self._loops:
+                self._set_velocity_target(index, position)
+                continue
             # Only RB200 needs 0xFF after the first position-mode frame; arm-protocol motors
             # get the explicit position mode on every frame.
             mode = (
@@ -402,6 +531,9 @@ class LiftRosNode(Node):
     ) -> SetBool.Response:
         self._control_enabled = bool(request.data)
         self._control_gate_block_logged = False
+        if not self._control_enabled:
+            for index in self._loops:
+                self._stop_velocity(index)
         state = "opened" if request.data else "closed"
         response.success = True
         response.message = "External control gate %s" % state
@@ -483,6 +615,8 @@ class LiftRosNode(Node):
         )
         for name in self._position_mode_sent:
             self._position_mode_sent[name] = False
+        for index in self._loops:
+            self._stop_velocity(index)
         if request.data and ok:
             self._enable_wanted = True
             self._recover_after = time.monotonic() + 1.0
